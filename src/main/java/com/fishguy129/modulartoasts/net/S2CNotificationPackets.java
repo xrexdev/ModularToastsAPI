@@ -1,23 +1,38 @@
 package com.fishguy129.modulartoasts.net;
 
+import com.fishguy129.modulartoasts.ModularToasts;
 import com.fishguy129.modulartoasts.api.Notification;
 import com.fishguy129.modulartoasts.api.NotificationKind;
 import com.fishguy129.modulartoasts.api.NotificationTheme;
+import com.fishguy129.modulartoasts.api.NotificationDisplay;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.sounds.SoundEvent;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.fml.DistExecutor;
-import net.minecraftforge.network.NetworkEvent;
+import net.neoforged.neoforge.network.handling.IPayloadContext;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.function.Supplier;
+public record S2CNotificationPackets(Notification notification) implements CustomPacketPayload {
 
-public record S2CNotificationPacket(Notification notification) {
+    public static final CustomPacketPayload.Type<S2CNotificationPackets> TYPE =
+            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath("modulartoasts", "notification"));
 
-    public static void encode(S2CNotificationPacket pkt, FriendlyByteBuf buf) {
+    public static final StreamCodec<RegistryFriendlyByteBuf, S2CNotificationPackets> STREAM_CODEC = new StreamCodec<>() {
+        @Override
+        public S2CNotificationPackets decode(RegistryFriendlyByteBuf buf) {
+            return S2CNotificationPackets.decode(buf);
+        }
+
+        @Override
+        public void encode(RegistryFriendlyByteBuf buf, S2CNotificationPackets value) {
+            S2CNotificationPackets.encode(buf, value);
+        }
+    };
+
+    public static void encode(RegistryFriendlyByteBuf buf, S2CNotificationPackets pkt) {
         Notification n = pkt.notification();
 
         buf.writeVarInt(n.kind().ordinal());
@@ -29,7 +44,7 @@ public record S2CNotificationPacket(Notification notification) {
 
         boolean hasIcon = n.icon() != null && !n.icon().isEmpty();
         buf.writeBoolean(hasIcon);
-        if (hasIcon) buf.writeItem(n.icon());
+        if (hasIcon) ItemStack.STREAM_CODEC.encode(buf, n.icon());
 
         buf.writeVarInt(n.displayTicks());
 
@@ -47,7 +62,7 @@ public record S2CNotificationPacket(Notification notification) {
         }
 
         buf.writeBoolean(n.mergeable());
-        // display
+
         var d = n.display();
         buf.writeVarInt(d.anchor().ordinal());
         buf.writeVarInt(d.maxVisible());
@@ -55,7 +70,7 @@ public record S2CNotificationPacket(Notification notification) {
         buf.writeBoolean(d.stack());
     }
 
-    public static S2CNotificationPacket decode(FriendlyByteBuf buf) {
+    public static S2CNotificationPackets decode(RegistryFriendlyByteBuf buf) {
         NotificationKind kind = NotificationKind.values()[buf.readVarInt()];
         String title = buf.readUtf(256);
         String message = buf.readUtf(512);
@@ -64,16 +79,16 @@ public record S2CNotificationPacket(Notification notification) {
         if (buf.readBoolean()) valueLine = buf.readUtf(128);
 
         ItemStack icon = ItemStack.EMPTY;
-        if (buf.readBoolean()) icon = buf.readItem();
+        if (buf.readBoolean()) icon = ItemStack.STREAM_CODEC.decode(buf);
 
         int displayTicks = buf.readVarInt();
 
         NotificationTheme theme = new NotificationTheme(
-                buf.readInt(), // accent
-                buf.readInt(), // bg
-                buf.readInt(), // title
-                buf.readInt(), // text
-                buf.readInt()  // outline
+                buf.readInt(),
+                buf.readInt(),
+                buf.readInt(),
+                buf.readInt(),
+                buf.readInt()
         );
 
         @Nullable SoundEvent sound = null;
@@ -84,35 +99,25 @@ public record S2CNotificationPacket(Notification notification) {
 
         boolean mergeable = buf.readBoolean();
 
-        var anchor = com.fishguy129.modulartoasts.api.NotificationDisplay.Anchor.values()[buf.readVarInt()];
+        NotificationDisplay.Anchor anchor = NotificationDisplay.Anchor.values()[buf.readVarInt()];
         int maxVisible = buf.readVarInt();
         int priority = buf.readVarInt();
         boolean stack = buf.readBoolean();
-        var display = new com.fishguy129.modulartoasts.api.NotificationDisplay(anchor, maxVisible, priority, stack);
+        NotificationDisplay display = new NotificationDisplay(anchor, maxVisible, priority, stack);
 
-
-        Notification n = new Notification(
-                kind,
-                title,
-                message,
-                valueLine,
-                icon,
-                displayTicks,
-                theme,
-                sound,
-                mergeable,
-                display
-        );
-        return new S2CNotificationPacket(n);
+        Notification notification = new Notification(kind, title, message, valueLine, icon, displayTicks, theme, sound, mergeable, display);
+        return new S2CNotificationPackets(notification);
     }
 
-    public static void handle(S2CNotificationPacket pkt, Supplier<NetworkEvent.Context> ctx) {
-        ctx.get().enqueueWork(() -> {
-            // Safe: only runs on client
-            DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () ->
-                    com.fishguy129.modulartoasts.client.overlay.NotificationQueue.enqueue(pkt.notification())
-            );
+    @Override
+    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+        return TYPE;
+    }
+
+
+    public static void handle(S2CNotificationPackets pkt, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            com.fishguy129.modulartoasts.client.overlay.NotificationQueue.enqueue(pkt.notification());
         });
-        ctx.get().setPacketHandled(true);
     }
 }
